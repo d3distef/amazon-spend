@@ -1,178 +1,229 @@
-# app.py — Streamlit dashboard v2
+# app.py – Amazon spend dashboard
 # ───────────────────────────────────────────────────────────────────────
-# Requirements (add to requirements.txt):
-# streamlit
-# pandas
-# plotly
-# prophet       # for forecast tab
+# Author: you 😊   Run:  streamlit run app.py
+# CSV expected at C:\amazon-spend\Official_categorized_purchase_history.csv
+# Columns: see README or sample screenshot
 
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import streamlit as st
+from pathlib import Path
 
-# Prophet is optional for local dev
-try:
-    from prophet import Prophet
-    PROPHET_OK = True
-except ImportError:
-    PROPHET_OK = False
+# Prophet is heavy – import lazily for fast reloads
+from functools import lru_cache
 
-st.set_page_config(page_title="Amazon Spend", layout="wide")
+st.set_page_config(page_title="Amazon Spend Dashboard", layout="wide")
 
-# ── 1 · LOAD & PREP ────────────────────────────────────────────────────
-@st.cache_data
-def load_data() -> pd.DataFrame:
-    df = pd.read_csv("amazon_complete_categories.csv", parse_dates=["date"])
-    df["Real Total"] = df["Real Total"].astype(float).round(2)
-    df["year"] = df["date"].dt.year
-    df["month_name"] = df["date"].dt.month_name()
-    df["month_num"] = df["date"].dt.month
+# ───────────────────────────────────────────────────────────────────────
+# 1 · LOAD  +  PREP
+# ───────────────────────────────────────────────────────────────────────
+DATA_PATH = Path(r"C:\amazon-spend\Official_categorized_purchase_history.csv")
+
+@st.cache_data(show_spinner="Loading & parsing CSV …")
+def load_data(csv_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+
+    # parse timestamps
+    df["Order Date"] = pd.to_datetime(df["Order Date"], utc=True, errors="coerce")
+    df = df.dropna(subset=["Order Date"])          # guard bad rows
+
+    # numeric
+    df["Total"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0.0).round(2)
+
+    # time helpers
+    df["Year"]        = df["Order Date"].dt.year
+    df["MonthNum"]    = df["Order Date"].dt.month
+    df["Month name"]  = df["Order Date"].dt.month_name()
+
+    # tidy category strings
+    df["Insurance_Cats"] = df["Insurance_Cats"].astype(str).str.strip()
+    df["Gen_Cats"]       = df["Gen_Cats"].astype(str).str.strip()
+    df["Room"]           = df["Room"].astype(str).str.strip()
+
     return df
 
-df = load_data()
+df = load_data(DATA_PATH)
 
-# ── 2 · SIDEBAR FILTERS ───────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────
+# 2 · SIDEBAR FILTERS
+# ───────────────────────────────────────────────────────────────────────
 st.sidebar.header("Filters")
-cats = sorted(df["category"].unique())
-incs = sorted(df["insurance_category"].unique())
-pick_cat = st.sidebar.multiselect("Shopping categories", cats, default=cats)
-pick_inc = st.sidebar.multiselect("Insurance categories", incs, default=incs)
 
-df = df[df["category"].isin(pick_cat) & df["insurance_category"].isin(pick_inc)]
+years = sorted(df["Year"].unique())
+gen_all  = sorted(df["Gen_Cats"].unique())
+room_all = sorted(df["Room"].unique())
 
-# ── 3 · LAYOUT TABS ───────────────────────────────────────────────────
-tab_over, tab_deep, tab_heat, tab_pie, tab_fcst, tab_data = st.tabs(
-    ["Overview 📊", "Deep Dive 🔍", "Heat maps 🔥", "Pie charts 🥧",
-     "Forecast 📈", "Data / Download ⬇️"]
+pick_year = st.sidebar.slider("Year range", int(min(years)), int(max(years)),
+                              (int(min(years)), int(max(years))))
+pick_gen  = st.sidebar.multiselect("Gen_Cats (shopping)", gen_all, default=gen_all)
+pick_room = st.sidebar.multiselect("Room", room_all, default=room_all)
+
+mask = (
+    df["Year"].between(pick_year[0], pick_year[1]) &
+    df["Gen_Cats"].isin(pick_gen) &
+    df["Room"].isin(pick_room)
+)
+df_filt = df.loc[mask].copy()
+
+# ───────────────────────────────────────────────────────────────────────
+# 3 · EXECUTIVE METRICS
+# ───────────────────────────────────────────────────────────────────────
+colA, colB, colC = st.columns(3)
+colA.metric("Rows (after filter)", f"{len(df_filt):,}")
+colB.metric("Total spend $", f"${df_filt['Total'].sum():,.2f}")
+colC.metric("Avg. per item $", f"${df_filt['Total'].mean():,.2f}")
+
+st.divider()
+
+# ───────────────────────────────────────────────────────────────────────
+# 4 · TABS
+# ───────────────────────────────────────────────────────────────────────
+tab_ins, tab_shop, tab_year, tab_heat, tab_pie, tab_fcst, tab_data = st.tabs(
+    ["Insurance Treemap 🏠",
+     "Shopping Sunburst 🛒",
+     "Year‑on‑Year 📊",
+     "Heat maps 🔥",
+     "Pie charts 🥧",
+     "Forecast (Prophet) 📈",
+     "Data / Download ⬇️"]
 )
 
-# ── 3·1 OVERVIEW TAB ──────────────────────────────────────────────────
-with tab_over:
-    st.subheader("Treemap – Lifetime Spend")
-    agg_tree = df.groupby(["category", "items"])["Real Total"].sum().reset_index()
-    st.plotly_chart(
-        px.treemap(agg_tree, path=["category", "items"], values="Real Total"),
-        use_container_width=True)
-
-    st.divider()
-    st.subheader("Monthly Spend by Category")
-    monthly = (df.groupby([pd.Grouper(key="date", freq="M"), "category"])
-                 ["Real Total"].sum().reset_index())
-    st.plotly_chart(
-        px.area(monthly, x="date", y="Real Total", color="category"),
-        use_container_width=True)
-
-# ── 3·2 DEEP-DIVE TAB ────────────────────────────────────────────────
-with tab_deep:
-    st.subheader("Sunburst – Shopping → Insurance → Item")
-    st.plotly_chart(
-        px.sunburst(df, path=["category", "insurance_category", "items"],
-                    values="Real Total"),
-        use_container_width=True)
-
-    st.divider()
-    st.subheader("Top-10 Items by Spend")
-    top10 = (df.groupby("items")["Real Total"].sum()
-               .nlargest(10).reset_index())
-    fig_top = px.bar(top10, x="Real Total", y="items",
-                     orientation="h", title="Top-10 Items")
-    fig_top.update_layout(yaxis=dict(autorange="reversed"))
-    st.plotly_chart(fig_top, use_container_width=True)
-
-    st.divider()
-    st.subheader("Annual % Mix")
-    annual = (df.groupby(["year", "category"])["Real Total"].sum()
-                .groupby(level=0, group_keys=False)
-                .apply(lambda s: 100*s/s.sum())
-                .reset_index(name="pct"))
-    st.plotly_chart(
-        px.area(annual, x="year", y="pct", color="category",
-                groupnorm="fraction", labels={"pct": "% of year"}),
-        use_container_width=True)
-
-# ── 3·3 HEAT-MAP TAB ─────────────────────────────────────────────────
-with tab_heat:
-    sub1, sub2 = st.tabs(["Insurance vs Month", "Shopping vs Month"])
-    order_months = ["January","February","March","April","May","June",
-                    "July","August","September","October","November","December"]
-
-    with sub1:
-        st.subheader("Insurance Category vs Month")
-        if len(df):
-            heat = (df.groupby(["insurance_category","month_name"])
-                      ["Real Total"].sum().reset_index())
-            heat["month_name"] = pd.Categorical(heat["month_name"],
-                                                categories=order_months,
-                                                ordered=True)
-            st.plotly_chart(
-                px.density_heatmap(
-                    heat, x="month_name", y="insurance_category",
-                    z="Real Total", color_continuous_scale="Viridis"),
-                use_container_width=True)
-        else:
-            st.info("No data for current filter selection.")
-
-    with sub2:
-        st.subheader("Shopping Category vs Month")
-        if len(df):
-            heat2 = (df.groupby(["category","month_name"])
-                       ["Real Total"].sum().reset_index())
-            heat2["month_name"] = pd.Categorical(heat2["month_name"],
-                                                 categories=order_months,
-                                                 ordered=True)
-            st.plotly_chart(
-                px.density_heatmap(
-                    heat2, x="month_name", y="category", z="Real Total",
-                    color_continuous_scale="Viridis"),
-                use_container_width=True)
-        else:
-            st.info("No data for current filter selection.")
-
-# ── 3·4 PIE-CHART TAB ────────────────────────────────────────────────
-with tab_pie:
-    st.subheader("Pie Charts – Spend Breakdown per Shopping Category")
-    col1, col2 = st.columns(2)
-    for i, cat in enumerate(sorted(df["category"].unique())):
-        slice_df = df[df["category"] == cat]
-        spend = slice_df.groupby("insurance_category")["Real Total"].sum()
-        if spend.empty:
-            continue
-        pie = px.pie(spend.reset_index(), names="insurance_category",
-                     values="Real Total", title=f"{cat} → Insurance split")
-        (col1 if i % 2 == 0 else col2).plotly_chart(pie, use_container_width=True)
-
-# ── 3·5 FORECAST TAB ─────────────────────────────────────────────────
-with tab_fcst:
-    st.subheader("12-month Spend Forecast (Prophet)")
-    if not PROPHET_OK:
-        st.warning("`prophet` package not installed – add it to requirements.txt")
+# ── 4·1 INSURANCE TREEMAP ────────────────────────────────────────────
+with tab_ins:
+    st.subheader("Room → Insurance_Cats → Product treemap")
+    if df_filt.empty:
+        st.info("No data for current filters.")
     else:
-        sel_cat = st.selectbox("Choose shopping category", cats, index=0)
-        ts = (df[df["category"] == sel_cat]
-                .groupby(pd.Grouper(key="date", freq="M"))["Real Total"]
-                .sum().reset_index())
-        ts = ts.rename(columns={"date": "ds", "Real Total": "y"})
-        if len(ts) < 2 or ts["y"].sum() == 0:
-            st.info("Not enough data to forecast.")
-        else:
-            m = Prophet(yearly_seasonality=True)
-            m.fit(ts)
-            future = m.make_future_dataframe(periods=12, freq="M")
-            fcst = m.predict(future)
-            fig_fcst = px.line(fcst, x="ds", y="yhat",
-                               title=f"Forecast – {sel_cat}")
-            fig_fcst.add_scatter(x=ts["ds"], y=ts["y"],
-                                 mode="markers", name="Actual")
-            st.plotly_chart(fig_fcst, use_container_width=True)
+        tree = (df_filt.groupby(["Room","Insurance_Cats","Product Name"])
+                       ["Total"].sum().reset_index())
+        fig_tree = px.treemap(tree,
+                              path=["Room","Insurance_Cats","Product Name"],
+                              values="Total",
+                              color="Room",
+                              hover_data={"Total":":.2f"})
+        st.plotly_chart(fig_tree, use_container_width=True)
 
-# ── 3·6 DATA / DOWNLOAD TAB ─────────────────────────────────────────
-with tab_data:
-    st.subheader("Data preview (first 1 000 rows)")
-    st.dataframe(df.head(1000), use_container_width=True)
+# ── 4·2 SHOPPING SUNBURST ────────────────────────────────────────────
+with tab_shop:
+    st.subheader("Gen_Cats → Insurance_Cats → Product sunburst")
+    if df_filt.empty:
+        st.info("No data for current filters.")
+    else:
+        sun = (df_filt.groupby(["Gen_Cats","Insurance_Cats","Product Name"])
+                      ["Total"].sum().reset_index())
+        fig_sun = px.sunburst(sun,
+                              path=["Gen_Cats","Insurance_Cats","Product Name"],
+                              values="Total")
+        st.plotly_chart(fig_sun, use_container_width=True)
 
     st.divider()
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download filtered CSV",
-                       csv_bytes, "amazon_complete_categories.csv",
-                       "text/csv")
+    st.subheader("Top‑15 items by lifetime spend")
+    if not df_filt.empty:
+        top15 = (df_filt.groupby("Product Name")["Total"].sum()
+                           .nlargest(15).reset_index())
+        fig_top = px.bar(top15, x="Total", y="Product Name",
+                         orientation="h", text_auto=".2f")
+        fig_top.update_layout(yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_top, use_container_width=True)
+
+# ── 4·3 YEAR‑ON‑YEAR COMPARISON ──────────────────────────────────────
+with tab_year:
+    if df_filt.empty:
+        st.info("No data for current filters.")
+    else:
+        yo, y_pct = st.tabs(["$ spend by year", "% mix by year"])
+
+        with yo:
+            st.subheader("Stacked‑bar — annual spend by Gen_Cats")
+            g = (df_filt.groupby(["Year","Gen_Cats"])["Total"].sum()
+                       .reset_index())
+            fig_bar = px.bar(g, x="Year", y="Total", color="Gen_Cats",
+                             text_auto=".0f", title="Annual spend ($)")
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        with y_pct:
+            st.subheader("Area — annual % mix (Gen_Cats)")
+            g2 = (df_filt.groupby(["Year","Gen_Cats"])["Total"].sum()
+                          .reset_index())
+            g2["pct"] = g2.groupby("Year")["Total"].transform(
+                            lambda s: 100*s/s.sum())
+            fig_pct = px.area(g2, x="Year", y="pct", color="Gen_Cats",
+                              groupnorm="fraction", labels={"pct":"%"})
+            st.plotly_chart(fig_pct, use_container_width=True)
+
+# ── 4·4 HEAT MAP TAB ────────────────────────────────────────────────
+with tab_heat:
+    order_mo = ["January","February","March","April","May","June",
+                "July","August","September","October","November","December"]
+
+    st.subheader("Insurance_Cats vs Month heat‑map")
+    if df_filt.empty:
+        st.info("No data for current filters.")
+    else:
+        h = (df_filt.groupby(["Insurance_Cats","Month name"])["Total"].sum()
+                      .reset_index())
+        h["Month name"] = pd.Categorical(h["Month name"], categories=order_mo,
+                                         ordered=True)
+        fig_h = px.density_heatmap(
+            h, x="Month name", y="Insurance_Cats", z="Total",
+            color_continuous_scale="Viridis")
+        st.plotly_chart(fig_h, use_container_width=True)
+
+# ── 4·5 PIE CHARTS ──────────────────────────────────────────────────
+with tab_pie:
+    st.subheader("Per‑Gen_Cats spend split by Insurance_Cats")
+    col1, col2 = st.columns(2)
+    for i, g in enumerate(sorted(df_filt["Gen_Cats"].unique())):
+        slice_ = df_filt[df_filt["Gen_Cats"] == g]
+        pies = slice_.groupby("Insurance_Cats")["Total"].sum()
+        if pies.empty: continue
+        fig_p = px.pie(pies.reset_index(), names="Insurance_Cats",
+                       values="Total", title=g)
+        (col1 if i%2==0 else col2).plotly_chart(fig_p, use_container_width=True)
+
+# ── 4·6 FORECAST (PROPHET) ──────────────────────────────────────────
+with tab_fcst:
+    st.subheader("12‑month spend forecast (Prophet)")
+
+    if df_filt.empty:
+        st.info("No data for current filters.")
+    else:
+        sel_gen = st.selectbox("Choose Gen_Cats for forecast",
+                               sorted(df_filt["Gen_Cats"].unique()))
+        ts = (df_filt[df_filt["Gen_Cats"] == sel_gen]
+                      .groupby(pd.Grouper(key="Order Date", freq="M"))["Total"]
+                      .sum().reset_index())
+        ts = ts.rename(columns={"Order Date":"ds", "Total":"y"})
+
+        if len(ts) < 6 or ts["y"].sum() == 0:
+            st.info("Not enough data (≥6 months) for a stable forecast.")
+        else:
+            @lru_cache(maxsize=None)
+            def do_prophet(df_in: pd.DataFrame):
+                from prophet import Prophet
+                m = Prophet(yearly_seasonality=True, weekly_seasonality=False,
+                            daily_seasonality=False)
+                m.fit(df_in)
+                future = m.make_future_dataframe(periods=12, freq="M")
+                fcst = m.predict(future)
+                return fcst
+
+            fc = do_prophet(ts)
+            fig_f = px.line(fc, x="ds", y="yhat", title=f"{sel_gen} | forecast")
+            fig_f.add_scatter(x=ts["ds"], y=ts["y"], mode="markers+lines",
+                              name="Actual")
+            st.plotly_chart(fig_f, use_container_width=True)
+
+# ── 4·7 DATA / DOWNLOAD ─────────────────────────────────────────────
+with tab_data:
+    st.subheader("Preview (first 1 000 rows)")
+    st.dataframe(df_filt.head(1000), use_container_width=True)
+
+    st.divider()
+    st.download_button(
+        "⬇️ Download filtered CSV",
+        df_filt.to_csv(index=False).encode("utf-8"),
+        file_name="filtered_purchase_history.csv",
+        mime="text/csv"
+    )
