@@ -195,6 +195,7 @@ with tab_fcst:
                 .sum().reset_index()
               )
         ts = ts.rename(columns={"Order Date": "ds", "Total": "y"})
+        ts["ds"] = ts["ds"].dt.tz_localize(None)     #  ← remove UTC tz‑info
 
         # -------- guardrail: need enough history --------
         if len(ts) < 6 or ts["y"].sum() == 0:
