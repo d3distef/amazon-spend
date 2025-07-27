@@ -182,32 +182,44 @@ with tab_fcst:
 
     if df_filt.empty:
         st.info("No data for current filters.")
+
     else:
-        sel_gen = st.selectbox("Choose Gen_Cats for forecast",
-                               sorted(df_filt["Gen_Cats"].unique()))
+        # -------- choose category & build monthly TS --------
+        sel_gen = st.selectbox(
+            "Choose Gen_Cats for forecast",
+            sorted(df_filt["Gen_Cats"].unique())
+        )
+
         ts = (df_filt[df_filt["Gen_Cats"] == sel_gen]
-                      .groupby(pd.Grouper(key="Order Date", freq="M"))["Total"]
-                      .sum().reset_index())
-        ts = ts.rename(columns={"Order Date":"ds", "Total":"y"})
+                .groupby(pd.Grouper(key="Order Date", freq="M"))["Total"]
+                .sum().reset_index()
+              )
+        ts = ts.rename(columns={"Order Date": "ds", "Total": "y"})
 
-    if len(ts) < 6:
-        st.info("Need more data")
-    else:
-        @st.cache_data(show_spinner="Fitting Prophet …")
-        def do_prophet(gen_name: str, df_in: pd.DataFrame):
-            from prophet import Prophet
-            m = Prophet(yearly_seasonality=True, weekly_seasonality=False,
-                        daily_seasonality=False)
-            m.fit(df_in)
-            future = m.make_future_dataframe(periods=12, freq="M")
-            return m.predict(future)
+        # -------- guardrail: need enough history --------
+        if len(ts) < 6 or ts["y"].sum() == 0:
+            st.info("Need ≥ 6 months of non‑zero data for a stable forecast.")
 
-        fc = do_prophet(sel_gen, ts)   # first arg is hashable
-            fig_f = px.line(fc, x="ds", y="yhat", title=f"{sel_gen} | forecast")
-            fig_f.add_scatter(x=ts["ds"], y=ts["y"], mode="markers+lines",
-                              name="Actual")
+        else:
+            # -------- Prophet fit (cached by category) --------
+            @st.cache_data(show_spinner="Fitting Prophet …")
+            def do_prophet(gen_name: str, df_in: pd.DataFrame):
+                from prophet import Prophet
+                m = Prophet(yearly_seasonality=True,
+                            weekly_seasonality=False,
+                            daily_seasonality=False)
+                m.fit(df_in)
+                future = m.make_future_dataframe(periods=12, freq="M")
+                return m.predict(future)
+
+            fc = do_prophet(sel_gen, ts)
+
+            # -------- plot --------
+            fig_f = px.line(fc, x="ds", y="yhat",
+                            title=f"{sel_gen} | 12‑month forecast")
+            fig_f.add_scatter(x=ts["ds"], y=ts["y"],
+                              mode="markers+lines", name="Actual")
             st.plotly_chart(fig_f, use_container_width=True)
-
 # ── 4·7 DATA / DOWNLOAD ─────────────────────────────────────────────
 with tab_data:
     st.subheader("Preview (first 1 000 rows)")
