@@ -18,32 +18,26 @@ st.set_page_config(page_title="Amazon Spend Dashboard", layout="wide")
 # ───────────────────────────────────────────────────────────────────────
 # 1 · LOAD  +  PREP
 # ───────────────────────────────────────────────────────────────────────
-DATA_PATH = Path(r"C:\amazon-spend\Official_categorized_purchase_history.csv")
+@st.cache_data(show_spinner="Loading CSV …")
+def load_data() -> pd.DataFrame:
+    df = pd.read_csv("Official_categorized_purchase_history.csv")
 
-@st.cache_data(show_spinner="Loading & parsing CSV …")
-def load_data(csv_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-
-    # parse timestamps
+    # ── clean‑up columns ──────────────────
     df["Order Date"] = pd.to_datetime(df["Order Date"], utc=True, errors="coerce")
-    df = df.dropna(subset=["Order Date"])          # guard bad rows
+    df = df.dropna(subset=["Order Date"])
 
-    # numeric
-    df["Total"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0.0).round(2)
+    df["Total"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0).round(2)
 
-    # time helpers
-    df["Year"]        = df["Order Date"].dt.year
-    df["MonthNum"]    = df["Order Date"].dt.month
-    df["Month name"]  = df["Order Date"].dt.month_name()
+    df["Year"]       = df["Order Date"].dt.year
+    df["MonthNum"]   = df["Order Date"].dt.month
+    df["Month name"] = df["Order Date"].dt.month_name()
 
-    # tidy category strings
     df["Insurance_Cats"] = df["Insurance_Cats"].astype(str).str.strip()
     df["Gen_Cats"]       = df["Gen_Cats"].astype(str).str.strip()
     df["Room"]           = df["Room"].astype(str).str.strip()
-
     return df
 
-df = load_data(DATA_PATH)
+df = load_data()          # ← no argument
 
 # ───────────────────────────────────────────────────────────────────────
 # 2 · SIDEBAR FILTERS
