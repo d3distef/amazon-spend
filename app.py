@@ -97,6 +97,17 @@ with tab_ins:
                               color="Room",
                               hover_data={"Total":":.2f"})
         st.plotly_chart(fig_tree, use_container_width=True)
+    st.divider()
+    st.subheader("Gen_Cats → Product treemap")
+    if not df_filt.empty:
+        shop_tree = (df_filt.groupby(["Gen_Cats", "Product Name"])["Total"]
+                               .sum().reset_index())
+        fig_shop = px.treemap(shop_tree,
+                              path=["Gen_Cats", "Product Name"],
+                              values="Total",
+                              color="Gen_Cats",
+                              hover_data={"Total":":.2f"})
+        st.plotly_chart(fig_shop, use_container_width=True)
 
 # ── 4·2 SHOPPING SUNBURST ────────────────────────────────────────────
 with tab_shop:
