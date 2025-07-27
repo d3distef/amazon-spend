@@ -190,20 +190,19 @@ with tab_fcst:
                       .sum().reset_index())
         ts = ts.rename(columns={"Order Date":"ds", "Total":"y"})
 
-        if len(ts) < 6 or ts["y"].sum() == 0:
-            st.info("Not enough data (≥6 months) for a stable forecast.")
-        else:
-            @lru_cache(maxsize=None)
-            def do_prophet(df_in: pd.DataFrame):
-                from prophet import Prophet
-                m = Prophet(yearly_seasonality=True, weekly_seasonality=False,
-                            daily_seasonality=False)
-                m.fit(df_in)
-                future = m.make_future_dataframe(periods=12, freq="M")
-                fcst = m.predict(future)
-                return fcst
+    if len(ts) < 6:
+        st.info("Need more data")
+    else:
+        @st.cache_data(show_spinner="Fitting Prophet …")
+        def do_prophet(gen_name: str, df_in: pd.DataFrame):
+            from prophet import Prophet
+            m = Prophet(yearly_seasonality=True, weekly_seasonality=False,
+                        daily_seasonality=False)
+            m.fit(df_in)
+            future = m.make_future_dataframe(periods=12, freq="M")
+            return m.predict(future)
 
-            fc = do_prophet(ts)
+        fc = do_prophet(sel_gen, ts)   # first arg is hashable
             fig_f = px.line(fc, x="ds", y="yhat", title=f"{sel_gen} | forecast")
             fig_f.add_scatter(x=ts["ds"], y=ts["y"], mode="markers+lines",
                               name="Actual")
